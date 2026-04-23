@@ -108,18 +108,18 @@ class Recorder:
             ctrl = auto.ControlFromPoint(x, y)
             if ctrl:
                 name = ctrl.Name or ''
-                ctrl_type_en = ctrl.ControlTypeName or ''
+                ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
                 ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
                 window = ctrl.GetTopLevelControl()
                 window_name = window.Name if window else ''
                 parts = []
                 if window_name:
-                    parts.append(window_name)
+                    parts.append(f"【{window_name}】")
                 if name:
-                    parts.append(f"{ctrl_type}：{name}")
+                    parts.append(f"點擊{ctrl_type}「{name}」")
                 elif ctrl_type:
                     parts.append(f"點擊{ctrl_type}")
-                return '　｜　'.join(parts) if parts else f"點擊位置 ({x}, {y})"
+                return '　'.join(parts) if parts else f"點擊位置 ({x}, {y})"
         except Exception:
             pass
         return f"點擊位置 ({x}, {y})"
@@ -161,7 +161,7 @@ class Recorder:
             print(f"Capture error: {e}")
 
     def on_click(self, x, y, button, pressed):
-        if not pressed or not self.is_recording:
+        if not pressed or not self.is_recording or self.is_paused:
             return
         if button != mouse.Button.left:
             return
@@ -171,8 +171,15 @@ class Recorder:
 
     def start(self):
         self.is_recording = True
+        self.is_paused = False
         self.listener = mouse.Listener(on_click=self.on_click)
         self.listener.start()
+
+    def pause(self):
+        self.is_paused = True
+
+    def resume(self):
+        self.is_paused = False
 
     def stop(self):
         self.is_recording = False
@@ -214,6 +221,7 @@ class RecordingOverlay:
     def __init__(self, recorder, on_stop):
         self.recorder = recorder
         self.on_stop = on_stop
+        self._paused = False
         self.win = tk.Toplevel()
         self.win.title("記錄中")
         self.win.attributes('-topmost', True)
@@ -226,12 +234,28 @@ class RecordingOverlay:
     def _build(self):
         frame = ttk.Frame(self.win, padding=16)
         frame.pack()
-        ttk.Label(frame, text="● 記錄中", foreground='red',
-                  font=('Microsoft JhengHei', 11, 'bold')).pack()
+        self.status_label = ttk.Label(frame, text="● 記錄中", foreground='red',
+                                      font=('Microsoft JhengHei', 11, 'bold'))
+        self.status_label.pack()
         self.count_label = ttk.Label(frame, text="已記錄 0 個步驟",
                                      font=('Microsoft JhengHei', 10))
         self.count_label.pack(pady=6)
-        ttk.Button(frame, text="停止記錄", command=self._stop).pack()
+        btn_row = ttk.Frame(frame)
+        btn_row.pack()
+        self.pause_btn = ttk.Button(btn_row, text="暫停", command=self._toggle_pause, width=8)
+        self.pause_btn.pack(side='left', padx=(0, 6))
+        ttk.Button(btn_row, text="停止記錄", command=self._stop, width=8).pack(side='left')
+
+    def _toggle_pause(self):
+        self._paused = not self._paused
+        if self._paused:
+            self.recorder.pause()
+            self.pause_btn.config(text="繼續")
+            self.status_label.config(text="⏸ 已暫停", foreground='#888')
+        else:
+            self.recorder.resume()
+            self.pause_btn.config(text="暫停")
+            self.status_label.config(text="● 記錄中", foreground='red')
 
     def _update(self):
         if self.win.winfo_exists():
