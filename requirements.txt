@@ -2,4 +2,5 @@ pynput
 mss
 Pillow
 uiautomation
+fpdf2
 pyinstaller

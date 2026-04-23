@@ -17,11 +17,58 @@ try:
 except ImportError:
     HAS_UI_AUTO = False
 
+CTRL_TYPE_ZH = {
+    'Button': '按鈕',
+    'CheckBox': '勾選框',
+    'ComboBox': '下拉選單',
+    'Edit': '輸入框',
+    'Hyperlink': '連結',
+    'Image': '圖片',
+    'ListItem': '清單項目',
+    'List': '清單',
+    'Menu': '選單',
+    'MenuBar': '選單列',
+    'MenuItem': '選單項目',
+    'ProgressBar': '進度條',
+    'RadioButton': '選項按鈕',
+    'ScrollBar': '捲軸',
+    'Slider': '滑桿',
+    'StatusBar': '狀態列',
+    'Tab': '標籤頁',
+    'TabItem': '標籤',
+    'Text': '文字',
+    'TitleBar': '標題列',
+    'ToolBar': '工具列',
+    'Tree': '樹狀結構',
+    'TreeItem': '樹狀項目',
+    'Window': '視窗',
+    'Pane': '面板',
+    'Group': '群組',
+    'Header': '標題',
+    'Table': '表格',
+    'Document': '文件',
+    'Custom': '元件',
+}
+
 
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath('.'), relative_path)
+
+
+def find_chinese_font():
+    candidates = [
+        r'C:\Windows\Fonts\msjh.ttc',
+        r'C:\Windows\Fonts\mingliu.ttc',
+        r'C:\Windows\Fonts\kaiu.ttf',
+        r'C:\Windows\Fonts\simsun.ttc',
+        r'C:\Windows\Fonts\msgothic.ttc',
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
 
 
 class StepData:
@@ -61,7 +108,8 @@ class Recorder:
             ctrl = auto.ControlFromPoint(x, y)
             if ctrl:
                 name = ctrl.Name or ''
-                ctrl_type = ctrl.ControlTypeName or '元件'
+                ctrl_type_en = ctrl.ControlTypeName or ''
+                ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
                 window = ctrl.GetTopLevelControl()
                 window_name = window.Name if window else ''
                 parts = []
@@ -70,8 +118,8 @@ class Recorder:
                 if name:
                     parts.append(f"{ctrl_type}：{name}")
                 elif ctrl_type:
-                    parts.append(ctrl_type)
-                return '｜'.join(parts) if parts else f"點擊位置 ({x}, {y})"
+                    parts.append(f"點擊{ctrl_type}")
+                return '　｜　'.join(parts) if parts else f"點擊位置 ({x}, {y})"
         except Exception:
             pass
         return f"點擊位置 ({x}, {y})"
@@ -169,6 +217,7 @@ class RecordingOverlay:
         self.win = tk.Toplevel()
         self.win.title("記錄中")
         self.win.attributes('-topmost', True)
+        self.win.attributes('-alpha', 0.75)
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self._stop)
         self._build()
@@ -210,9 +259,13 @@ class EditorWindow:
         top.pack(fill='x', side='top')
         self.count_label = ttk.Label(top, text="", font=('Microsoft JhengHei', 11))
         self.count_label.pack(side='left')
-        ttk.Button(top, text="匯出 HTML", command=self._export).pack(side='right')
-        ttk.Separator(self.win, orient='horizontal').pack(fill='x')
 
+        btn_frame = ttk.Frame(top)
+        btn_frame.pack(side='right')
+        ttk.Button(btn_frame, text="匯出 PDF", command=self._export_pdf).pack(side='left', padx=(0, 6))
+        ttk.Button(btn_frame, text="匯出 HTML", command=self._export_html).pack(side='left')
+
+        ttk.Separator(self.win, orient='horizontal').pack(fill='x')
         outer = ttk.Frame(self.win)
         outer.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(outer, highlightthickness=0)
@@ -240,19 +293,16 @@ class EditorWindow:
     def _render_card(self, i, step):
         card = ttk.Frame(self.inner, relief='groove', padding=14)
         card.pack(fill='x', padx=12, pady=6)
-
         header = ttk.Frame(card)
         header.pack(fill='x')
         ttk.Label(header, text=f"步驟 {i+1}", font=('Microsoft JhengHei', 11, 'bold')).pack(side='left')
         ttk.Label(header, text=step.timestamp, foreground='#888').pack(side='left', padx=10)
         ttk.Button(header, text="刪除", command=lambda idx=i: self._delete(idx)).pack(side='right')
-
         var = tk.StringVar(value=step.description)
         entry = ttk.Entry(card, textvariable=var, font=('Microsoft JhengHei', 10))
         entry.pack(fill='x', pady=(8, 10))
         entry.bind('<FocusOut>', lambda e, idx=i, v=var: self._update_desc(idx, v.get()))
         entry.bind('<Return>', lambda e, idx=i, v=var: self._update_desc(idx, v.get()))
-
         try:
             img = Image.open(BytesIO(base64.b64decode(step.image_b64)))
             img.thumbnail((820, 460), Image.LANCZOS)
@@ -270,7 +320,7 @@ class EditorWindow:
         if 0 <= idx < len(self.recorder.steps):
             self.recorder.steps[idx].description = text
 
-    def _export(self):
+    def _export_html(self):
         if not self.recorder.steps:
             messagebox.showwarning("注意", "目前沒有任何步驟可以匯出。")
             return
@@ -282,7 +332,6 @@ class EditorWindow:
         )
         if not filepath:
             return
-
         steps_html = ''
         for i, step in enumerate(self.recorder.steps):
             steps_html += f'''
@@ -294,7 +343,6 @@ class EditorWindow:
       </div>
       <img src="data:image/jpeg;base64,{step.image_b64}" alt="步驟 {i+1}">
     </div>'''
-
         html = f'''<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
@@ -326,11 +374,107 @@ class EditorWindow:
   </div>
 </body>
 </html>'''
-
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(html)
         messagebox.showinfo("完成", f"已匯出：\n{filepath}")
         webbrowser.open(filepath)
+
+    def _export_pdf(self):
+        if not self.recorder.steps:
+            messagebox.showwarning("注意", "目前沒有任何步驟可以匯出。")
+            return
+        filepath = filedialog.asksaveasfilename(
+            defaultextension='.pdf',
+            filetypes=[('PDF 檔案', '*.pdf')],
+            initialfile='教學步驟記錄',
+            title='匯出為'
+        )
+        if not filepath:
+            return
+        try:
+            from fpdf import FPDF
+        except ImportError:
+            messagebox.showerror("錯誤", "缺少 PDF 套件，請確認程式已正確安裝。")
+            return
+
+        font_path = find_chinese_font()
+
+        class PDF(FPDF):
+            pass
+
+        pdf = PDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        if font_path:
+            try:
+                pdf.add_font('CJK', fname=font_path)
+                font_name = 'CJK'
+            except Exception:
+                font_name = 'Helvetica'
+        else:
+            font_name = 'Helvetica'
+
+        # Title page
+        pdf.add_page()
+        pdf.set_font(font_name, size=22)
+        pdf.ln(20)
+        pdf.cell(0, 12, '教學步驟記錄', new_x='LMARGIN', new_y='NEXT', align='C')
+        pdf.set_font(font_name, size=11)
+        pdf.set_text_color(140, 140, 140)
+        pdf.cell(0, 8,
+                 f'共 {len(self.recorder.steps)} 個步驟  |  {time.strftime("%Y-%m-%d %H:%M")}',
+                 new_x='LMARGIN', new_y='NEXT', align='C')
+        pdf.set_text_color(0, 0, 0)
+
+        temp_dir = os.environ.get('TEMP', os.path.expanduser('~'))
+
+        for i, step in enumerate(self.recorder.steps):
+            pdf.add_page()
+
+            # Step number badge area
+            pdf.set_fill_color(59, 130, 246)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font(font_name, size=13)
+            pdf.cell(0, 10, f'  步驟 {i+1}', new_x='LMARGIN', new_y='NEXT', fill=True)
+            pdf.set_text_color(0, 0, 0)
+
+            # Description
+            pdf.set_font(font_name, size=11)
+            pdf.ln(3)
+            pdf.multi_cell(0, 7, step.description)
+
+            pdf.set_font(font_name, size=9)
+            pdf.set_text_color(160, 160, 160)
+            pdf.cell(0, 6, step.timestamp, new_x='LMARGIN', new_y='NEXT')
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(4)
+
+            # Image
+            try:
+                img_data = base64.b64decode(step.image_b64)
+                img = Image.open(BytesIO(img_data))
+                tmp_path = os.path.join(temp_dir, f'_step_tmp_{i}.jpg')
+                img.save(tmp_path, 'JPEG', quality=85)
+
+                page_w = pdf.w - pdf.l_margin - pdf.r_margin
+                img_w, img_h = img.size
+                display_w = page_w
+                display_h = img_h * (page_w / img_w)
+
+                remaining = pdf.h - pdf.get_y() - pdf.b_margin
+                if display_h > remaining and display_h > 20:
+                    ratio = remaining / display_h
+                    display_w *= ratio
+                    display_h = remaining
+
+                pdf.image(tmp_path, x=pdf.l_margin, w=display_w, h=display_h)
+                os.remove(tmp_path)
+            except Exception:
+                pdf.cell(0, 8, '（圖片載入失敗）', new_x='LMARGIN', new_y='NEXT')
+
+        pdf.output(filepath)
+        messagebox.showinfo("完成", f"已匯出：\n{filepath}")
+        os.startfile(filepath)
 
 
 class App:
