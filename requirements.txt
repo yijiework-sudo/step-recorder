@@ -1,0 +1,5 @@
+pynput
+mss
+Pillow
+uiautomation
+pyinstaller
