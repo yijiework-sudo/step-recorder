@@ -112,8 +112,9 @@ class Recorder:
         self.listener = None
         self.kb_listener = None
         self._lock = threading.Lock()
+        self._capture_sem = threading.Semaphore(1)  # 同時只允許一個截圖作業
         self._modifiers = set()
-        self._last_shortcut = ('', 0)  # (combo, timestamp) 防止重複觸發
+        self._last_shortcut = ('', 0)
         self.on_step_added = None
 
     def load_monitors(self):
@@ -128,17 +129,28 @@ class Recorder:
         return (m['left'] <= x < m['left'] + m['width'] and
                 m['top'] <= y < m['top'] + m['height'])
 
+    def _query_with_timeout(self, fn, timeout=1.5):
+        result = [None]
+        def _run():
+            try:
+                result[0] = fn()
+            except Exception:
+                pass
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+        return result[0]
+
     def get_active_window_name(self):
         if not HAS_UI_AUTO:
             return ''
-        try:
+        def _query():
             ctrl = auto.GetFocusedControl()
             if ctrl:
                 window = ctrl.GetTopLevelControl()
                 return window.Name if window else ''
-        except Exception:
-            pass
-        return ''
+            return ''
+        return self._query_with_timeout(_query) or ''
 
     def format_shortcut(self, key):
         parts = []
@@ -215,27 +227,29 @@ class Recorder:
     def get_element_description(self, x, y):
         if not HAS_UI_AUTO:
             return f"點擊位置 ({x}, {y})"
-        try:
+        def _query():
             ctrl = auto.ControlFromPoint(x, y)
-            if ctrl:
-                name = ctrl.Name or ''
-                ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
-                ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
-                window = ctrl.GetTopLevelControl()
-                window_name = window.Name if window else ''
-                parts = []
-                if window_name:
-                    parts.append(f"【{window_name}】")
-                if name:
-                    parts.append(f"點擊{ctrl_type}「{name}」")
-                elif ctrl_type:
-                    parts.append(f"點擊{ctrl_type}")
-                return '　'.join(parts) if parts else f"點擊位置 ({x}, {y})"
-        except Exception:
-            pass
-        return f"點擊位置 ({x}, {y})"
+            if not ctrl:
+                return None
+            name = ctrl.Name or ''
+            ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
+            ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
+            window = ctrl.GetTopLevelControl()
+            window_name = window.Name if window else ''
+            parts = []
+            if window_name:
+                parts.append(f"【{window_name}】")
+            if name:
+                parts.append(f"點擊{ctrl_type}「{name}」")
+            elif ctrl_type:
+                parts.append(f"點擊{ctrl_type}")
+            return '　'.join(parts) if parts else None
+        result = self._query_with_timeout(_query, timeout=1.5)
+        return result if result else f"點擊位置 ({x}, {y})"
 
     def capture_step(self, x, y):
+        if not self._capture_sem.acquire(blocking=False):
+            return
         try:
             description = self.get_element_description(x, y)
             m = self.get_selected_monitor()
@@ -270,6 +284,8 @@ class Recorder:
                 self.on_step_added(len(self.steps))
         except Exception as e:
             print(f"Capture error: {e}")
+        finally:
+            self._capture_sem.release()
 
     def on_click(self, x, y, button, pressed):
         if not pressed or not self.is_recording or self.is_paused:
@@ -341,40 +357,70 @@ class RecordingOverlay:
         self.recorder = recorder
         self.on_stop = on_stop
         self._paused = False
+        self._drag_x = 0
+        self._drag_y = 0
         self.win = tk.Toplevel()
-        self.win.title("記錄中")
+        self.win.title("● 記錄中")
         self.win.attributes('-topmost', True)
-        self.win.attributes('-alpha', 0.75)
+        self.win.attributes('-alpha', 0.80)
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self._stop)
         self._build()
         self._update()
+        # 2 秒後自動最小化，避免遮到畫面
+        self.win.after(2000, self._auto_minimize)
 
     def _build(self):
-        frame = ttk.Frame(self.win, padding=16)
+        frame = ttk.Frame(self.win, padding=12)
         frame.pack()
-        self.status_label = ttk.Label(frame, text="● 記錄中", foreground='red',
-                                      font=('Microsoft JhengHei', 11, 'bold'))
+
+        # 可拖曳標題列
+        title_row = tk.Frame(frame, bg='#cc0000', cursor='fleur')
+        title_row.pack(fill='x', pady=(0, 8))
+        tk.Label(title_row, text="  ● 教學步驟記錄器", fg='white', bg='#cc0000',
+                 font=('Microsoft JhengHei', 10, 'bold')).pack(side='left', pady=4)
+        tk.Button(title_row, text='＿', bg='#cc0000', fg='white', relief='flat',
+                  bd=0, command=self.win.iconify, cursor='arrow').pack(side='right', padx=4)
+        title_row.bind('<ButtonPress-1>', self._drag_start)
+        title_row.bind('<B1-Motion>', self._drag_move)
+
+        self.status_label = ttk.Label(frame, text="記錄中…",
+                                      font=('Microsoft JhengHei', 10))
         self.status_label.pack()
         self.count_label = ttk.Label(frame, text="已記錄 0 個步驟",
                                      font=('Microsoft JhengHei', 10))
-        self.count_label.pack(pady=6)
+        self.count_label.pack(pady=(2, 8))
         btn_row = ttk.Frame(frame)
         btn_row.pack()
         self.pause_btn = ttk.Button(btn_row, text="暫停", command=self._toggle_pause, width=8)
         self.pause_btn.pack(side='left', padx=(0, 6))
         ttk.Button(btn_row, text="停止記錄", command=self._stop, width=8).pack(side='left')
 
+    def _drag_start(self, event):
+        self._drag_x = event.x_root - self.win.winfo_x()
+        self._drag_y = event.y_root - self.win.winfo_y()
+
+    def _drag_move(self, event):
+        x = event.x_root - self._drag_x
+        y = event.y_root - self._drag_y
+        self.win.geometry(f'+{x}+{y}')
+
+    def _auto_minimize(self):
+        if self.win.winfo_exists():
+            self.win.iconify()
+
     def _toggle_pause(self):
         self._paused = not self._paused
         if self._paused:
             self.recorder.pause()
             self.pause_btn.config(text="繼續")
-            self.status_label.config(text="⏸ 已暫停", foreground='#888')
+            self.status_label.config(text="已暫停")
+            self.win.title("⏸ 已暫停")
         else:
             self.recorder.resume()
             self.pause_btn.config(text="暫停")
-            self.status_label.config(text="● 記錄中", foreground='red')
+            self.status_label.config(text="記錄中…")
+            self.win.title("● 記錄中")
 
     def _update(self):
         if self.win.winfo_exists():
