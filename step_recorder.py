@@ -3,7 +3,7 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 import mss
 from PIL import Image, ImageDraw, ImageTk
-from pynput import mouse
+from pynput import mouse, keyboard
 import base64
 from io import BytesIO
 import time
@@ -51,6 +51,29 @@ CTRL_TYPE_ZH = {
 }
 
 
+MODIFIER_KEYS = {
+    keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
+    keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
+    keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
+    keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r,
+}
+
+STANDALONE_KEYS = {
+    keyboard.Key.enter: 'Enter',
+    keyboard.Key.delete: 'Delete',
+    keyboard.Key.backspace: 'Backspace',
+    keyboard.Key.tab: 'Tab',
+    keyboard.Key.esc: 'Esc',
+    keyboard.Key.space: '空白鍵',
+    keyboard.Key.f1: 'F1', keyboard.Key.f2: 'F2', keyboard.Key.f3: 'F3',
+    keyboard.Key.f4: 'F4', keyboard.Key.f5: 'F5', keyboard.Key.f6: 'F6',
+    keyboard.Key.f7: 'F7', keyboard.Key.f8: 'F8', keyboard.Key.f9: 'F9',
+    keyboard.Key.f10: 'F10', keyboard.Key.f11: 'F11', keyboard.Key.f12: 'F12',
+    keyboard.Key.home: 'Home', keyboard.Key.end: 'End',
+    keyboard.Key.page_up: 'Page Up', keyboard.Key.page_down: 'Page Down',
+}
+
+
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
@@ -85,8 +108,12 @@ class Recorder:
         self.selected_monitor_idx = 0
         self.monitors = []
         self.is_recording = False
+        self.is_paused = False
         self.listener = None
+        self.kb_listener = None
         self._lock = threading.Lock()
+        self._modifiers = set()
+        self._last_shortcut = ('', 0)  # (combo, timestamp) 防止重複觸發
         self.on_step_added = None
 
     def load_monitors(self):
@@ -100,6 +127,90 @@ class Recorder:
         m = self.get_selected_monitor()
         return (m['left'] <= x < m['left'] + m['width'] and
                 m['top'] <= y < m['top'] + m['height'])
+
+    def get_active_window_name(self):
+        if not HAS_UI_AUTO:
+            return ''
+        try:
+            ctrl = auto.GetFocusedControl()
+            if ctrl:
+                window = ctrl.GetTopLevelControl()
+                return window.Name if window else ''
+        except Exception:
+            pass
+        return ''
+
+    def format_shortcut(self, key):
+        parts = []
+        if any(k in self._modifiers for k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)):
+            parts.append('Ctrl')
+        if any(k in self._modifiers for k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)):
+            parts.append('Shift')
+        if any(k in self._modifiers for k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)):
+            parts.append('Alt')
+        if any(k in self._modifiers for k in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)):
+            parts.append('Win')
+        if key in STANDALONE_KEYS:
+            parts.append(STANDALONE_KEYS[key])
+        elif hasattr(key, 'char') and key.char:
+            parts.append(key.char.upper())
+        else:
+            parts.append(str(key).replace('Key.', '').upper())
+        return '+'.join(parts)
+
+    def capture_shortcut(self, combo):
+        try:
+            window_name = self.get_active_window_name()
+            parts = []
+            if window_name:
+                parts.append(f"【{window_name}】")
+            parts.append(f"按下快捷鍵 {combo}")
+            description = '　'.join(parts)
+
+            m = self.get_selected_monitor()
+            with mss.mss() as sct:
+                screenshot = sct.grab(m)
+            img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
+            buf = BytesIO()
+            w, h = img.size
+            if w > 1600:
+                ratio = 1600 / w
+                img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
+            img.save(buf, format='JPEG', quality=85)
+            img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+            step = StepData(
+                step_id=len(self.steps) + 1,
+                description=description,
+                image_b64=img_b64,
+                timestamp=time.strftime('%H:%M:%S')
+            )
+            with self._lock:
+                self.steps.append(step)
+            if self.on_step_added:
+                self.on_step_added(len(self.steps))
+        except Exception as e:
+            print(f"Shortcut capture error: {e}")
+
+    def on_key_press(self, key):
+        if not self.is_recording or self.is_paused:
+            return
+        if key in MODIFIER_KEYS:
+            self._modifiers.add(key)
+            return
+        has_modifier = bool(self._modifiers)
+        is_standalone = key in STANDALONE_KEYS
+        if not has_modifier and not is_standalone:
+            return
+        combo = self.format_shortcut(key)
+        now = time.time()
+        if combo == self._last_shortcut[0] and now - self._last_shortcut[1] < 0.5:
+            return
+        self._last_shortcut = (combo, now)
+        threading.Thread(target=self.capture_shortcut, args=(combo,), daemon=True).start()
+
+    def on_key_release(self, key):
+        self._modifiers.discard(key)
 
     def get_element_description(self, x, y):
         if not HAS_UI_AUTO:
@@ -174,6 +285,11 @@ class Recorder:
         self.is_paused = False
         self.listener = mouse.Listener(on_click=self.on_click)
         self.listener.start()
+        self.kb_listener = keyboard.Listener(
+            on_press=self.on_key_press,
+            on_release=self.on_key_release
+        )
+        self.kb_listener.start()
 
     def pause(self):
         self.is_paused = True
@@ -186,6 +302,9 @@ class Recorder:
         if self.listener:
             self.listener.stop()
             self.listener = None
+        if self.kb_listener:
+            self.kb_listener.stop()
+            self.kb_listener = None
 
 
 class SetupWindow:
