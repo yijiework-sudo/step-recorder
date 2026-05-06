@@ -17,40 +17,6 @@ try:
 except ImportError:
     HAS_UI_AUTO = False
 
-CTRL_TYPE_ZH = {
-    'Button': '按鈕',
-    'CheckBox': '勾選框',
-    'ComboBox': '下拉選單',
-    'Edit': '輸入框',
-    'Hyperlink': '連結',
-    'Image': '圖片',
-    'ListItem': '清單項目',
-    'List': '清單',
-    'Menu': '選單',
-    'MenuBar': '選單列',
-    'MenuItem': '選單項目',
-    'ProgressBar': '進度條',
-    'RadioButton': '選項按鈕',
-    'ScrollBar': '捲軸',
-    'Slider': '滑桿',
-    'StatusBar': '狀態列',
-    'Tab': '標籤頁',
-    'TabItem': '標籤',
-    'Text': '文字',
-    'TitleBar': '標題列',
-    'ToolBar': '工具列',
-    'Tree': '樹狀結構',
-    'TreeItem': '樹狀項目',
-    'Window': '視窗',
-    'Pane': '面板',
-    'Group': '群組',
-    'Header': '標題',
-    'Table': '表格',
-    'Document': '文件',
-    'Custom': '元件',
-}
-
-
 MODIFIER_KEYS = {
     keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
     keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
@@ -109,13 +75,31 @@ class Recorder:
         self.monitors = []
         self.is_recording = False
         self.is_paused = False
-        self.listener = None
         self.kb_listener = None
         self._lock = threading.Lock()
-        self._capture_sem = threading.Semaphore(1)  # 同時只允許一個截圖作業
+        self._capture_sem = threading.Semaphore(1)
         self._modifiers = set()
-        self._last_shortcut = ('', 0)
+        self._hotkey_mods = frozenset()
+        self._hotkey_key = keyboard.Key.f9
+        self._hotkey_str = 'F9'
+        self._last_capture_time = 0
         self.on_step_added = None
+
+    def set_hotkey(self, mods, key, display_str):
+        self._hotkey_mods = frozenset(mods)
+        self._hotkey_key = key
+        self._hotkey_str = display_str
+
+    def _mod_group(self, key):
+        if key in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
+            return keyboard.Key.ctrl
+        if key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
+            return keyboard.Key.shift
+        if key in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r):
+            return keyboard.Key.alt
+        if key in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r):
+            return keyboard.Key.cmd
+        return None
 
     def load_monitors(self):
         with mss.mss() as sct:
@@ -123,11 +107,6 @@ class Recorder:
 
     def get_selected_monitor(self):
         return self.monitors[self.selected_monitor_idx]
-
-    def is_in_selected_monitor(self, x, y):
-        m = self.get_selected_monitor()
-        return (m['left'] <= x < m['left'] + m['width'] and
-                m['top'] <= y < m['top'] + m['height'])
 
     def _query_with_timeout(self, fn, timeout=1.5):
         result = [None]
@@ -152,123 +131,43 @@ class Recorder:
             return ''
         return self._query_with_timeout(_query) or ''
 
-    def format_shortcut(self, key):
-        parts = []
-        if any(k in self._modifiers for k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)):
-            parts.append('Ctrl')
-        if any(k in self._modifiers for k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)):
-            parts.append('Shift')
-        if any(k in self._modifiers for k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)):
-            parts.append('Alt')
-        if any(k in self._modifiers for k in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)):
-            parts.append('Win')
-        if key in STANDALONE_KEYS:
-            parts.append(STANDALONE_KEYS[key])
-        elif hasattr(key, 'char') and key.char:
-            parts.append(key.char.upper())
-        else:
-            parts.append(str(key).replace('Key.', '').upper())
-        return '+'.join(parts)
-
-    def capture_shortcut(self, combo):
-        try:
-            window_name = self.get_active_window_name()
-            parts = []
-            if window_name:
-                parts.append(f"【{window_name}】")
-            parts.append(f"按下快捷鍵 {combo}")
-            description = '　'.join(parts)
-
-            m = self.get_selected_monitor()
-            with mss.mss() as sct:
-                screenshot = sct.grab(m)
-            img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
-            buf = BytesIO()
-            w, h = img.size
-            if w > 1600:
-                ratio = 1600 / w
-                img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
-            img.save(buf, format='JPEG', quality=85)
-            img_b64 = base64.b64encode(buf.getvalue()).decode()
-
-            step = StepData(
-                step_id=len(self.steps) + 1,
-                description=description,
-                image_b64=img_b64,
-                timestamp=time.strftime('%H:%M:%S')
-            )
-            with self._lock:
-                self.steps.append(step)
-            if self.on_step_added:
-                self.on_step_added(len(self.steps))
-        except Exception as e:
-            print(f"Shortcut capture error: {e}")
-
     def on_key_press(self, key):
         if not self.is_recording or self.is_paused:
             return
-        if key in MODIFIER_KEYS:
-            self._modifiers.add(key)
+        grp = self._mod_group(key)
+        if grp:
+            self._modifiers.add(grp)
             return
-        has_modifier = bool(self._modifiers)
-        is_standalone = key in STANDALONE_KEYS
-        if not has_modifier and not is_standalone:
-            return
-        combo = self.format_shortcut(key)
-        now = time.time()
-        if combo == self._last_shortcut[0] and now - self._last_shortcut[1] < 0.5:
-            return
-        self._last_shortcut = (combo, now)
-        threading.Thread(target=self.capture_shortcut, args=(combo,), daemon=True).start()
+        current_mods = frozenset(self._modifiers)
+        if key == self._hotkey_key and current_mods == self._hotkey_mods:
+            now = time.time()
+            if now - self._last_capture_time < 0.5:
+                return
+            self._last_capture_time = now
+            threading.Thread(target=self.capture_manual_step, daemon=True).start()
 
     def on_key_release(self, key):
-        self._modifiers.discard(key)
+        grp = self._mod_group(key)
+        if grp:
+            self._modifiers.discard(grp)
 
-    def get_element_description(self, x, y):
-        if not HAS_UI_AUTO:
-            return f"點擊位置 ({x}, {y})"
-        def _query():
-            ctrl = auto.ControlFromPoint(x, y)
-            if not ctrl:
-                return None
-            name = ctrl.Name or ''
-            ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
-            ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
-            window = ctrl.GetTopLevelControl()
-            window_name = window.Name if window else ''
-            parts = []
-            if window_name:
-                parts.append(f"【{window_name}】")
-            if name:
-                parts.append(f"點擊{ctrl_type}「{name}」")
-            elif ctrl_type:
-                parts.append(f"點擊{ctrl_type}")
-            return '　'.join(parts) if parts else None
-        result = self._query_with_timeout(_query, timeout=1.5)
-        return result if result else f"點擊位置 ({x}, {y})"
-
-    def capture_step(self, x, y):
+    def capture_manual_step(self):
         if not self._capture_sem.acquire(blocking=False):
             return
         try:
-            description = self.get_element_description(x, y)
+            window_name = self.get_active_window_name()
+            description = f"【{window_name}】" if window_name else f"步驟 {len(self.steps) + 1}"
+
             m = self.get_selected_monitor()
             with mss.mss() as sct:
                 screenshot = sct.grab(m)
             img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
 
-            rel_x = x - m['left']
-            rel_y = y - m['top']
-            draw = ImageDraw.Draw(img)
-            r = 22
-            draw.ellipse([rel_x-r, rel_y-r, rel_x+r, rel_y+r], outline='red', width=3)
-            draw.ellipse([rel_x-4, rel_y-4, rel_x+4, rel_y+4], fill='red')
-
             buf = BytesIO()
             w, h = img.size
             if w > 1600:
                 ratio = 1600 / w
-                img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
+                img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
             img.save(buf, format='JPEG', quality=85)
             img_b64 = base64.b64encode(buf.getvalue()).decode()
 
@@ -287,20 +186,10 @@ class Recorder:
         finally:
             self._capture_sem.release()
 
-    def on_click(self, x, y, button, pressed):
-        if not pressed or not self.is_recording or self.is_paused:
-            return
-        if button != mouse.Button.left:
-            return
-        if not self.is_in_selected_monitor(x, y):
-            return
-        threading.Thread(target=self.capture_step, args=(x, y), daemon=True).start()
-
     def start(self):
         self.is_recording = True
         self.is_paused = False
-        self.listener = mouse.Listener(on_click=self.on_click)
-        self.listener.start()
+        self._modifiers = set()
         self.kb_listener = keyboard.Listener(
             on_press=self.on_key_press,
             on_release=self.on_key_release
@@ -315,9 +204,6 @@ class Recorder:
 
     def stop(self):
         self.is_recording = False
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
         if self.kb_listener:
             self.kb_listener.stop()
             self.kb_listener = None
@@ -330,18 +216,94 @@ class SetupWindow:
         self.win = tk.Tk()
         self.win.title("教學步驟記錄器")
         self.win.resizable(False, False)
+        self._hotkey_listener = None
+        self._temp_mods = set()
         self._build()
 
     def _build(self):
         frame = ttk.Frame(self.win, padding=28)
         frame.pack()
-        ttk.Label(frame, text="教學步驟記錄器", font=('Microsoft JhengHei', 16, 'bold')).pack(pady=(0, 6))
-        ttk.Label(frame, text="選擇要記錄的螢幕", font=('Microsoft JhengHei', 11)).pack(pady=(0, 14))
+        ttk.Label(frame, text="教學步驟記錄器",
+                  font=('Microsoft JhengHei', 16, 'bold')).pack(pady=(0, 6))
+        ttk.Label(frame, text="選擇要記錄的螢幕",
+                  font=('Microsoft JhengHei', 11)).pack(pady=(0, 14))
         self.var = tk.IntVar(value=0)
         for i, m in enumerate(self.recorder.monitors):
             label = f"螢幕 {i+1}　（{m['width']} × {m['height']}）"
             ttk.Radiobutton(frame, text=label, variable=self.var, value=i).pack(anchor='w', pady=3)
+
+        ttk.Separator(frame, orient='horizontal').pack(fill='x', pady=(18, 14))
+
+        hk_row = ttk.Frame(frame)
+        hk_row.pack(fill='x')
+        ttk.Label(hk_row, text="截圖快捷鍵：",
+                  font=('Microsoft JhengHei', 11)).pack(side='left')
+        self.hotkey_btn = ttk.Button(hk_row, text=self.recorder._hotkey_str,
+                                     command=self._start_hotkey_capture, width=16)
+        self.hotkey_btn.pack(side='left', padx=8)
+        self.hotkey_hint = ttk.Label(frame, text="點擊按鈕可更改快捷鍵",
+                                     font=('Microsoft JhengHei', 9), foreground='#888')
+        self.hotkey_hint.pack(pady=(4, 0))
+
         ttk.Button(frame, text="開始記錄", command=self._start, width=20).pack(pady=(20, 0))
+
+    def _start_hotkey_capture(self):
+        self.hotkey_btn.config(text='請按下快捷鍵…', state='disabled')
+        self.hotkey_hint.config(text='按下你想要的按鍵組合', foreground='#E67E22')
+        self._temp_mods = set()
+        self._hotkey_listener = keyboard.Listener(
+            on_press=self._on_hk_press,
+            on_release=self._on_hk_release
+        )
+        self._hotkey_listener.start()
+
+    def _on_hk_press(self, key):
+        if key in MODIFIER_KEYS:
+            self._temp_mods.add(key)
+            return
+        # Build display string
+        parts = []
+        if any(k in self._temp_mods for k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)):
+            parts.append('Ctrl')
+        if any(k in self._temp_mods for k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)):
+            parts.append('Shift')
+        if any(k in self._temp_mods for k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)):
+            parts.append('Alt')
+        if any(k in self._temp_mods for k in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)):
+            parts.append('Win')
+        if key in STANDALONE_KEYS:
+            parts.append(STANDALONE_KEYS[key])
+        elif hasattr(key, 'char') and key.char:
+            parts.append(key.char.upper())
+        else:
+            parts.append(str(key).replace('Key.', '').upper())
+
+        # Normalize modifier set for matching
+        norm_mods = set()
+        if any(k in self._temp_mods for k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)):
+            norm_mods.add(keyboard.Key.ctrl)
+        if any(k in self._temp_mods for k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)):
+            norm_mods.add(keyboard.Key.shift)
+        if any(k in self._temp_mods for k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)):
+            norm_mods.add(keyboard.Key.alt)
+        if any(k in self._temp_mods for k in (keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r)):
+            norm_mods.add(keyboard.Key.cmd)
+
+        self._captured_key = key
+        self._captured_mods = frozenset(norm_mods)
+        self._captured_display = '+'.join(parts)
+
+        self._hotkey_listener.stop()
+        self._hotkey_listener = None
+        self.win.after(0, self._apply_hotkey)
+
+    def _on_hk_release(self, key):
+        self._temp_mods.discard(key)
+
+    def _apply_hotkey(self):
+        self.recorder.set_hotkey(self._captured_mods, self._captured_key, self._captured_display)
+        self.hotkey_btn.config(text=self._captured_display, state='normal')
+        self.hotkey_hint.config(text='點擊按鈕可更改快捷鍵', foreground='#888')
 
     def _start(self):
         self.recorder.selected_monitor_idx = self.var.get()
@@ -367,14 +329,12 @@ class RecordingOverlay:
         self.win.protocol("WM_DELETE_WINDOW", self._stop)
         self._build()
         self._update()
-        # 2 秒後自動最小化，避免遮到畫面
         self.win.after(2000, self._auto_minimize)
 
     def _build(self):
         frame = ttk.Frame(self.win, padding=12)
         frame.pack()
 
-        # 可拖曳標題列
         title_row = tk.Frame(frame, bg='#cc0000', cursor='fleur')
         title_row.pack(fill='x', pady=(0, 8))
         tk.Label(title_row, text="  ● 教學步驟記錄器", fg='white', bg='#cc0000',
@@ -389,7 +349,10 @@ class RecordingOverlay:
         self.status_label.pack()
         self.count_label = ttk.Label(frame, text="已記錄 0 個步驟",
                                      font=('Microsoft JhengHei', 10))
-        self.count_label.pack(pady=(2, 8))
+        self.count_label.pack(pady=(2, 4))
+        ttk.Label(frame, text=f"按 {self.recorder._hotkey_str} 截圖",
+                  font=('Microsoft JhengHei', 9), foreground='#888').pack(pady=(0, 8))
+
         btn_row = ttk.Frame(frame)
         btn_row.pack()
         self.pause_btn = ttk.Button(btn_row, text="暫停", command=self._toggle_pause, width=8)
@@ -603,7 +566,6 @@ class EditorWindow:
         else:
             font_name = 'Helvetica'
 
-        # Title page
         pdf.add_page()
         pdf.set_font(font_name, size=22)
         pdf.ln(20)
@@ -620,14 +582,12 @@ class EditorWindow:
         for i, step in enumerate(self.recorder.steps):
             pdf.add_page()
 
-            # Step number badge area
             pdf.set_fill_color(59, 130, 246)
             pdf.set_text_color(255, 255, 255)
             pdf.set_font(font_name, size=13)
             pdf.cell(0, 10, f'  步驟 {i+1}', new_x='LMARGIN', new_y='NEXT', fill=True)
             pdf.set_text_color(0, 0, 0)
 
-            # Description
             pdf.set_font(font_name, size=11)
             pdf.ln(3)
             pdf.multi_cell(0, 7, step.description)
@@ -638,7 +598,6 @@ class EditorWindow:
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
-            # Image
             try:
                 img_data = base64.b64decode(step.image_b64)
                 img = Image.open(BytesIO(img_data))
