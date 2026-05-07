@@ -39,6 +39,19 @@ STANDALONE_KEYS = {
     keyboard.Key.page_up: 'Page Up', keyboard.Key.page_down: 'Page Down',
 }
 
+CTRL_TYPE_ZH = {
+    'Button': '按鈕', 'CheckBox': '勾選框', 'ComboBox': '下拉選單',
+    'Edit': '輸入框', 'Hyperlink': '連結', 'Image': '圖片',
+    'ListItem': '清單項目', 'List': '清單', 'Menu': '選單',
+    'MenuBar': '選單列', 'MenuItem': '選單項目', 'ProgressBar': '進度條',
+    'RadioButton': '選項按鈕', 'ScrollBar': '捲軸', 'Slider': '滑桿',
+    'StatusBar': '狀態列', 'Tab': '標籤頁', 'TabItem': '標籤',
+    'Text': '文字', 'TitleBar': '標題列', 'ToolBar': '工具列',
+    'Tree': '樹狀結構', 'TreeItem': '樹狀項目', 'Window': '視窗',
+    'Pane': '面板', 'Group': '群組', 'Header': '標題',
+    'Table': '表格', 'Document': '文件', 'Custom': '元件',
+}
+
 
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
@@ -83,6 +96,9 @@ class Recorder:
         self._hotkey_key = keyboard.Key.f9
         self._hotkey_str = 'F9'
         self._last_capture_time = 0
+        self._mouse_x = 0
+        self._mouse_y = 0
+        self.mouse_listener = None
         self.on_step_added = None
 
     def set_hotkey(self, mods, key, display_str):
@@ -120,6 +136,33 @@ class Recorder:
         t.join(timeout=timeout)
         return result[0]
 
+    def on_mouse_move(self, x, y):
+        self._mouse_x = x
+        self._mouse_y = y
+
+    def get_element_description(self, x, y):
+        if not HAS_UI_AUTO:
+            return f"點擊位置 ({x}, {y})"
+        def _query():
+            ctrl = auto.ControlFromPoint(x, y)
+            if not ctrl:
+                return None
+            name = ctrl.Name or ''
+            ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
+            ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
+            window = ctrl.GetTopLevelControl()
+            window_name = window.Name if window else ''
+            parts = []
+            if window_name:
+                parts.append(f"【{window_name}】")
+            if name:
+                parts.append(f"點擊{ctrl_type}「{name}」")
+            elif ctrl_type:
+                parts.append(f"點擊{ctrl_type}")
+            return '　'.join(parts) if parts else None
+        result = self._query_with_timeout(_query, timeout=1.5)
+        return result if result else f"點擊位置 ({x}, {y})"
+
     def get_active_window_name(self):
         if not HAS_UI_AUTO:
             return ''
@@ -155,13 +198,20 @@ class Recorder:
         if not self._capture_sem.acquire(blocking=False):
             return
         try:
-            window_name = self.get_active_window_name()
-            description = f"【{window_name}】" if window_name else f"步驟 {len(self.steps) + 1}"
+            x, y = self._mouse_x, self._mouse_y
+            description = self.get_element_description(x, y)
 
             m = self.get_selected_monitor()
             with mss.mss() as sct:
                 screenshot = sct.grab(m)
             img = Image.frombytes('RGB', screenshot.size, screenshot.bgra, 'raw', 'BGRX')
+
+            rel_x = x - m['left']
+            rel_y = y - m['top']
+            draw = ImageDraw.Draw(img)
+            r = 22
+            draw.ellipse([rel_x-r, rel_y-r, rel_x+r, rel_y+r], outline='red', width=3)
+            draw.ellipse([rel_x-4, rel_y-4, rel_x+4, rel_y+4], fill='red')
 
             buf = BytesIO()
             w, h = img.size
@@ -190,6 +240,8 @@ class Recorder:
         self.is_recording = True
         self.is_paused = False
         self._modifiers = set()
+        self.mouse_listener = mouse.Listener(on_move=self.on_mouse_move)
+        self.mouse_listener.start()
         self.kb_listener = keyboard.Listener(
             on_press=self.on_key_press,
             on_release=self.on_key_release
@@ -204,6 +256,9 @@ class Recorder:
 
     def stop(self):
         self.is_recording = False
+        if self.mouse_listener:
+            self.mouse_listener.stop()
+            self.mouse_listener = None
         if self.kb_listener:
             self.kb_listener.stop()
             self.kb_listener = None
