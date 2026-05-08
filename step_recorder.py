@@ -650,15 +650,32 @@ class EditorWindow:
 
         temp_dir = os.environ.get('TEMP', os.path.expanduser('~'))
 
-        MAX_IMG_H = 110  # 每張圖最高 110mm，避免單圖佔滿整頁
-        page_w = pdf.w - pdf.l_margin - pdf.r_margin
+        MARGIN = 10
+        CONTENT_W = 210 - MARGIN * 2
+        pdf.set_auto_page_break(auto=False)
 
         for i, step in enumerate(self.recorder.steps):
-            # 剩餘空間不足 40mm 才換頁，否則繼續接排
-            if pdf.get_y() > pdf.h - pdf.b_margin - 40:
-                pdf.add_page()
-            elif i > 0:
-                pdf.ln(6)
+            # 預先讀取圖片尺寸
+            img_obj = None
+            img_h_mm = 0
+            try:
+                img_bytes = base64.b64decode(step.image_b64)
+                img_obj = Image.open(BytesIO(img_bytes))
+                img_w_px, img_h_px = img_obj.size
+                img_h_mm = round(img_h_px * (CONTENT_W / img_w_px), 2)
+            except Exception:
+                pass
+
+            # 估算描述文字高度（每 30 字一行，每行 6mm，加 6mm buffer）
+            desc_lines = max(1, (len(step.description) + 29) // 30)
+            desc_h = desc_lines * 6 + 6
+
+            # 計算本頁所需高度
+            page_h = MARGIN + 9 + 2 + desc_h + 5 + 3 + img_h_mm + MARGIN
+            page_h = max(page_h, 60)
+
+            pdf.add_page(format=(210, page_h))
+            pdf.set_margins(MARGIN, MARGIN, MARGIN)
 
             pdf.set_fill_color(59, 130, 246)
             pdf.set_text_color(255, 255, 255)
@@ -674,32 +691,16 @@ class EditorWindow:
             pdf.set_text_color(160, 160, 160)
             pdf.cell(0, 5, step.timestamp, new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(0, 0, 0)
-            pdf.ln(2)
+            pdf.ln(3)
 
-            try:
-                img_data = base64.b64decode(step.image_b64)
-                img = Image.open(BytesIO(img_data))
-                tmp_path = os.path.join(temp_dir, f'_step_tmp_{i}.jpg')
-                img.save(tmp_path, 'JPEG', quality=85)
-
-                img_w, img_h = img.size
-                display_w = page_w
-                display_h = img_h * (page_w / img_w)
-
-                # 限制圖片最大高度
-                if display_h > MAX_IMG_H:
-                    display_w = display_w * (MAX_IMG_H / display_h)
-                    display_h = MAX_IMG_H
-
-                # 剩餘空間放不下就換頁
-                remaining = pdf.h - pdf.get_y() - pdf.b_margin
-                if display_h > remaining:
-                    pdf.add_page()
-
-                pdf.image(tmp_path, x=pdf.l_margin, w=display_w, h=display_h)
-                os.remove(tmp_path)
-            except Exception:
-                pdf.cell(0, 8, '（圖片載入失敗）', new_x='LMARGIN', new_y='NEXT')
+            if img_obj is not None:
+                try:
+                    tmp_path = os.path.join(temp_dir, f'_step_tmp_{i}.jpg')
+                    img_obj.save(tmp_path, 'JPEG', quality=85)
+                    pdf.image(tmp_path, x=MARGIN, w=CONTENT_W, h=img_h_mm)
+                    os.remove(tmp_path)
+                except Exception:
+                    pdf.cell(0, 8, '（圖片載入失敗）', new_x='LMARGIN', new_y='NEXT')
 
         pdf.output(filepath)
         messagebox.showinfo("完成", f"已匯出：\n{filepath}")
