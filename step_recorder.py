@@ -140,28 +140,40 @@ class Recorder:
         self._mouse_x = x
         self._mouse_y = y
 
+    def _get_foreground_window_title(self):
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.user32.GetWindowTextW(
+                ctypes.windll.user32.GetForegroundWindow(), buf, 512)
+            return buf.value or ''
+        except Exception:
+            return ''
+
     def get_element_description(self, x, y):
-        if not HAS_UI_AUTO:
-            return f"點擊位置 ({x}, {y})"
-        def _query():
-            ctrl = auto.ControlFromPoint(x, y)
-            if not ctrl:
-                return None
-            name = ctrl.Name or ''
-            ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
-            ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
-            window = ctrl.GetTopLevelControl()
-            window_name = window.Name if window else ''
-            parts = []
-            if window_name:
-                parts.append(f"【{window_name}】")
-            if name:
-                parts.append(f"點擊{ctrl_type}「{name}」")
-            elif ctrl_type:
-                parts.append(f"點擊{ctrl_type}")
-            return '　'.join(parts) if parts else None
-        result = self._query_with_timeout(_query, timeout=1.5)
-        return result if result else f"點擊位置 ({x}, {y})"
+        if HAS_UI_AUTO:
+            def _query():
+                ctrl = auto.ControlFromPoint(x, y)
+                if not ctrl:
+                    return None
+                name = ctrl.Name or ''
+                ctrl_type_en = (ctrl.ControlTypeName or '').replace('Control', '').strip()
+                ctrl_type = CTRL_TYPE_ZH.get(ctrl_type_en, ctrl_type_en)
+                window = ctrl.GetTopLevelControl()
+                window_name = window.Name if window else ''
+                parts = []
+                if window_name:
+                    parts.append(f"【{window_name}】")
+                if name:
+                    parts.append(f"點擊{ctrl_type}「{name}」")
+                elif ctrl_type:
+                    parts.append(f"點擊{ctrl_type}")
+                return '　'.join(parts) if parts else None
+            result = self._query_with_timeout(_query, timeout=1.5)
+            if result:
+                return result
+        window_name = self._get_foreground_window_title()
+        return f"【{window_name}】" if window_name else f"步驟 {len(self.steps) + 1}"
 
     def get_active_window_name(self):
         if not HAS_UI_AUTO:
@@ -484,7 +496,9 @@ class EditorWindow:
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfig(
             self.canvas_win, width=e.width))
-        self.canvas.bind_all('<MouseWheel>', lambda e: self.canvas.yview_scroll(
+        self.canvas.bind('<MouseWheel>', lambda e: self.canvas.yview_scroll(
+            int(-1*(e.delta/120)), 'units'))
+        self.inner.bind('<MouseWheel>', lambda e: self.canvas.yview_scroll(
             int(-1*(e.delta/120)), 'units'))
         scrollbar.pack(side='right', fill='y')
         self.canvas.pack(side='left', fill='both', expand=True)
@@ -506,7 +520,9 @@ class EditorWindow:
         ttk.Label(header, text=step.timestamp, foreground='#888').pack(side='left', padx=10)
         ttk.Button(header, text="刪除", command=lambda idx=i: self._delete(idx)).pack(side='right')
         var = tk.StringVar(value=step.description)
-        entry = ttk.Entry(card, textvariable=var, font=('Microsoft JhengHei', 10))
+        entry = tk.Entry(card, textvariable=var, font=('Microsoft JhengHei', 10),
+                         relief='flat', highlightthickness=1, highlightbackground='#ccc',
+                         highlightcolor='#3B82F6')
         entry.pack(fill='x', pady=(8, 10))
         entry.bind('<FocusOut>', lambda e, idx=i, v=var: self._update_desc(idx, v.get()))
         entry.bind('<Return>', lambda e, idx=i, v=var: self._update_desc(idx, v.get()))
@@ -634,24 +650,31 @@ class EditorWindow:
 
         temp_dir = os.environ.get('TEMP', os.path.expanduser('~'))
 
+        MAX_IMG_H = 110  # 每張圖最高 110mm，避免單圖佔滿整頁
+        page_w = pdf.w - pdf.l_margin - pdf.r_margin
+
         for i, step in enumerate(self.recorder.steps):
-            pdf.add_page()
+            # 剩餘空間不足 40mm 才換頁，否則繼續接排
+            if pdf.get_y() > pdf.h - pdf.b_margin - 40:
+                pdf.add_page()
+            elif i > 0:
+                pdf.ln(6)
 
             pdf.set_fill_color(59, 130, 246)
             pdf.set_text_color(255, 255, 255)
-            pdf.set_font(font_name, size=13)
-            pdf.cell(0, 10, f'  步驟 {i+1}', new_x='LMARGIN', new_y='NEXT', fill=True)
+            pdf.set_font(font_name, size=12)
+            pdf.cell(0, 9, f'  步驟 {i+1}', new_x='LMARGIN', new_y='NEXT', fill=True)
             pdf.set_text_color(0, 0, 0)
 
-            pdf.set_font(font_name, size=11)
-            pdf.ln(3)
-            pdf.multi_cell(0, 7, step.description)
+            pdf.set_font(font_name, size=10)
+            pdf.ln(2)
+            pdf.multi_cell(0, 6, step.description)
 
-            pdf.set_font(font_name, size=9)
+            pdf.set_font(font_name, size=8)
             pdf.set_text_color(160, 160, 160)
-            pdf.cell(0, 6, step.timestamp, new_x='LMARGIN', new_y='NEXT')
+            pdf.cell(0, 5, step.timestamp, new_x='LMARGIN', new_y='NEXT')
             pdf.set_text_color(0, 0, 0)
-            pdf.ln(4)
+            pdf.ln(2)
 
             try:
                 img_data = base64.b64decode(step.image_b64)
@@ -659,16 +682,19 @@ class EditorWindow:
                 tmp_path = os.path.join(temp_dir, f'_step_tmp_{i}.jpg')
                 img.save(tmp_path, 'JPEG', quality=85)
 
-                page_w = pdf.w - pdf.l_margin - pdf.r_margin
                 img_w, img_h = img.size
                 display_w = page_w
                 display_h = img_h * (page_w / img_w)
 
+                # 限制圖片最大高度
+                if display_h > MAX_IMG_H:
+                    display_w = display_w * (MAX_IMG_H / display_h)
+                    display_h = MAX_IMG_H
+
+                # 剩餘空間放不下就換頁
                 remaining = pdf.h - pdf.get_y() - pdf.b_margin
-                if display_h > remaining and display_h > 20:
-                    ratio = remaining / display_h
-                    display_w *= ratio
-                    display_h = remaining
+                if display_h > remaining:
+                    pdf.add_page()
 
                 pdf.image(tmp_path, x=pdf.l_margin, w=display_w, h=display_h)
                 os.remove(tmp_path)
